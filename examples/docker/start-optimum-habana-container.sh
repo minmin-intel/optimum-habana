@@ -1,0 +1,2 @@
+#!/bin/bash
+docker run -it --name optimum-habana --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none -v ~/workspace:/home/user/workspace -v ~/workspace/logs:/tmp --cap-add=sys_nice --net=host --ipc=host optimum-habana-1p11-mh:latest
