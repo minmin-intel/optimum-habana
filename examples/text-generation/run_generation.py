@@ -32,6 +32,7 @@ from utils import adjust_batch, count_hpu_graphs, initialize_model
 
 from optimum.habana.utils import get_hpu_memory_stats
 
+import pandas as pd
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -260,6 +261,26 @@ def setup_parser(parser):
         action="store_true",
         help="Whether to enable device map auto. In case no space left on cpu, weights will be offloaded to disk.",
     )
+
+    parser.add_argument(
+        "--test_custom",
+        action="store_true",
+        help="test custom dataset",
+    )
+
+    parser.add_argument(
+        "--filepath",
+        type = str,
+        help="filepath to custom dataset",
+    )
+
+    parser.add_argument(
+        "--download_dataset",
+        action="store_true",
+        help="whether to download dataset",
+    )
+
+
     args = parser.parse_args()
 
     if args.torch_compile:
@@ -267,6 +288,9 @@ def setup_parser(parser):
 
     if not args.use_hpu_graphs:
         args.limit_hpu_graphs = False
+
+
+    
 
     args.quant_config = os.getenv("QUANT_CONFIG", "")
     return args
@@ -326,6 +350,8 @@ def main():
                 1342,  # Pride and Prejudice
             ]
             input_sentences = assemble_prompt(prompt_size=args.max_input_tokens, book_path=download_book(book_ids[0]))
+        
+
         else:
             input_sentences = [
                 "DeepSpeed is a machine learning framework",
@@ -467,84 +493,121 @@ def main():
         print(separator)
         print()
     else:
-        # Downloading and loading a dataset from the hub.
-        from datasets import load_dataset
-        from torch.utils.data import DataLoader
+        if args.download_dataset:
+            # Downloading and loading a dataset from the hub.
+            from datasets import load_dataset
+            from torch.utils.data import DataLoader
 
-        assert args.simulate_dyn_prompt == "", "Both dataset_name and simulate_dyn_prompt are set"
+            assert args.simulate_dyn_prompt == "", "Both dataset_name and simulate_dyn_prompt are set"
 
-        raw_dataset = load_dataset(args.dataset_name)
-        if "test" in raw_dataset:
-            split = "test"
-        elif "validation" in raw_dataset:
-            split = "validation"
-        else:
-            split = "train"
-        raw_dataset = (
-            raw_dataset[split]
-            .shuffle()
-            .select(range(args.dataset_max_samples if args.dataset_max_samples > 0 else (raw_dataset[split]).num_rows))
-        )
-
-        if args.column_name is None:
-            # If no column name is given, take the first column that has strings
-            column_name = [key for key in raw_dataset.features.keys() if raw_dataset.features[key].dtype == "string"][
-                0
-            ]
-            logger.info(
-                f"No column name was given so automatically choosing '{column_name}' for prompts. If you would like to use another column of the dataset, you can set the argument `--column_name`."
-            )
-        else:
-            column_name = args.column_name
-
-        # Remove unused columns
-        raw_dataset = raw_dataset.remove_columns([name for name in raw_dataset.column_names if name != column_name])
-
-        # Set the prompt length to args.max_input_tokens if > 0 else (if 0 truncate to 16, otherwise use full length)
-        prompt_length = args.max_input_tokens if args.max_input_tokens > 0 else (-1, 16)[args.max_input_tokens == 0]
-
-        def preprocess_function(examples):
-            # Tokenize the texts
-            return tokenizer(
-                examples[column_name],
-                padding="max_length",
-                max_length=prompt_length if prompt_length > 0 else None,
-                truncation=prompt_length > 0,
+            raw_dataset = load_dataset(args.dataset_name)
+            if "test" in raw_dataset:
+                split = "test"
+            elif "validation" in raw_dataset:
+                split = "validation"
+            else:
+                split = "train"
+            raw_dataset = (
+                raw_dataset[split]
+                .shuffle()
+                .select(range(args.dataset_max_samples if args.dataset_max_samples > 0 else (raw_dataset[split]).num_rows))
             )
 
-        raw_dataset = raw_dataset.map(
-            preprocess_function,
-            batched=True,
-            desc="Running tokenizer on dataset",
-        )
-        # After tokenization, we can remove the column of interest
-        raw_dataset = raw_dataset.remove_columns([column_name])
-        raw_dataset.set_format(type="torch")
+            if args.column_name is None:
+                # If no column name is given, take the first column that has strings
+                column_name = [key for key in raw_dataset.features.keys() if raw_dataset.features[key].dtype == "string"][
+                    0
+                ]
+                logger.info(
+                    f"No column name was given so automatically choosing '{column_name}' for prompts. If you would like to use another column of the dataset, you can set the argument `--column_name`."
+                )
+            else:
+                column_name = args.column_name
 
-        if prompt_length <= 0:
-            # Todo please check if this collate function is suitable for your model
-            # This has been tested for OPT, llama, and Bloom
-            assert model.config.model_type in ["opt", "bloom", "llama"]
+            # Remove unused columns
+            raw_dataset = raw_dataset.remove_columns([name for name in raw_dataset.column_names if name != column_name])
 
-            def collate_fn(data):
-                collect = {k: [dt[k] for dt in data] for k in data[0]}
-                result = {}
-                for k in collect:
-                    tensors = collect[k]
-                    max_shape = max([item.shape[0] for item in tensors])
-                    result[k] = torch.stack(
-                        [torch.cat((torch.zeros(max_shape - t.shape[0], dtype=t.dtype), t)) for t in tensors], 0
-                    )
-                return result
+            # Set the prompt length to args.max_input_tokens if > 0 else (if 0 truncate to 16, otherwise use full length)
+            prompt_length = args.max_input_tokens if args.max_input_tokens > 0 else (-1, 16)[args.max_input_tokens == 0]
 
-        else:
+            def preprocess_function(examples):
+                # Tokenize the texts
+                return tokenizer(
+                    examples[column_name],
+                    padding="max_length",
+                    max_length=prompt_length if prompt_length > 0 else None,
+                    truncation=prompt_length > 0,
+                )
+
+            raw_dataset = raw_dataset.map(
+                preprocess_function,
+                batched=True,
+                desc="Running tokenizer on dataset",
+            )
+            # After tokenization, we can remove the column of interest
+            raw_dataset = raw_dataset.remove_columns([column_name])
+            raw_dataset.set_format(type="torch")
+
+            if prompt_length <= 0:
+                # Todo please check if this collate function is suitable for your model
+                # This has been tested for OPT, llama, and Bloom
+                assert model.config.model_type in ["opt", "bloom", "llama"]
+
+                def collate_fn(data):
+                    collect = {k: [dt[k] for dt in data] for k in data[0]}
+                    result = {}
+                    for k in collect:
+                        tensors = collect[k]
+                        max_shape = max([item.shape[0] for item in tensors])
+                        result[k] = torch.stack(
+                            [torch.cat((torch.zeros(max_shape - t.shape[0], dtype=t.dtype), t)) for t in tensors], 0
+                        )
+                    return result
+
+            else:
+                collate_fn = None
+        
+        elif args.test_custom:
+            print('Loading custom dataset for test....')
+            from prompt_templates import PROMPT_BUSINESS_SENSITIVE
+            from torch.utils.data import Dataset
+            from torch.utils.data import DataLoader
+
+            class CustomDataset(Dataset):
+                def __init__(self, data, tokenizer, prompt_template):
+                    self.data = data
+                    self.tokenizer = tokenizer
+                    self.prompt_template = prompt_template
+
+                def __len__(self):
+                    return len(self.data)
+                
+                def __getitem__(self, i):
+                    # output = pipe(prompt)[0]['generated_text'][-1]
+                    chat = [
+                        {"role": "user",
+                        "content":self.prompt_template.format(text=self.data[i])}
+                    ]
+                    prompt = self.tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+                    return prompt
+
+            df = pd.read_csv(args.filepath)
+            text = df['text'].to_list()
+
+            raw_dataset = CustomDataset(text, tokenizer, PROMPT_BUSINESS_SENSITIVE)
             collate_fn = None
+            prompt_length = 1
+            print('Finished loading custom dataset!')
+
 
         dataloader = DataLoader(raw_dataset, batch_size=args.batch_size, collate_fn=collate_fn)
 
         def generate_dataset(batch):
-            prompt = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
+            # prompt = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
+            prompt = None
             # Move inputs to target device(s)
+            if args.test_custom:
+                batch = tokenizer.batch_encode_plus(batch, return_tensors="pt", padding=True)
             for t in batch:
                 if torch.is_tensor(batch[t]):
                     batch[t] = batch[t].to(args.device)
@@ -589,7 +652,7 @@ def main():
             total_new_tokens_generated += args.batch_size * args.max_new_tokens
             print(separator)
             print(f"Batch n°{i+1}")
-            print(f"Input: {prompt[:args.batch_size]}")
+            # print(f"Input: {prompt[:args.batch_size]}")
             print(
                 f"Output: {tokenizer.batch_decode(outputs, skip_special_tokens=True)[:args.batch_size*args.num_return_sequences]}"
             )
